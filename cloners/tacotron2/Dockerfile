@@ -7,6 +7,7 @@ ENV PATH=/opt/conda/bin:$PATH
 RUN apt-get update --fix-missing && apt-get install -y \
     wget \
     git \
+    vim \
     python3-dev \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
@@ -48,6 +49,10 @@ WORKDIR /workspace/apex
 RUN /opt/conda/bin/conda run -n taco2 pip install -r requirements.txt \
     && /opt/conda/bin/conda run -n taco2 pip install -v --disable-pip-version-check \ 
        --no-cache-dir --no-build-isolation --global-option="--cpp_ext" --global-option="--cuda_ext" .
+
+# Modify train.py (fix)
+RUN sed -i 's/, pin_memory=False//'  /workspace/tacotron2/train.py
+RUN sed -i 's/, num_workers=1//'  /workspace/tacotron2/train.py
 
 # Verify CUDA installation
 RUN nvcc --version \
