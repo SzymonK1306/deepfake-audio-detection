@@ -8,6 +8,7 @@ RUN apt-get update --fix-missing && apt-get install -y \
     wget \
     git \
     vim \
+    ffmpeg \
     python3-dev \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
@@ -21,11 +22,6 @@ RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -
 # Create and activate conda environment
 RUN /opt/conda/bin/conda create --name taco2 python=3.6.8 \
     && echo "source activate taco2" > ~/.bashrc
-
-# Clone Tacotron2
-RUN git clone https://github.com/NVIDIA/tacotron2.git /workspace/tacotron2
-WORKDIR /workspace/tacotron2
-RUN git submodule init && git submodule update
 
 # Install Python dependencies
 RUN /opt/conda/bin/conda run -n taco2 pip install \
@@ -41,7 +37,8 @@ RUN /opt/conda/bin/conda run -n taco2 pip install \
         --extra-index-url https://download.pytorch.org/whl/cu113 \
     numba==0.48.0 \
     future \
-    resampy==0.3.1
+    resampy==0.3.1 \
+    pydub
 
 # Clone and configure Apex
 RUN git clone https://github.com/NVIDIA/apex.git /workspace/apex
@@ -50,15 +47,12 @@ RUN /opt/conda/bin/conda run -n taco2 pip install -r requirements.txt \
     && /opt/conda/bin/conda run -n taco2 pip install -v --disable-pip-version-check \ 
        --no-cache-dir --no-build-isolation --global-option="--cpp_ext" --global-option="--cuda_ext" .
 
-# Modify train.py (fix)
-RUN sed -i 's/, pin_memory=False//'  /workspace/tacotron2/train.py
-RUN sed -i 's/, num_workers=1//'  /workspace/tacotron2/train.py
-
 # Verify CUDA installation
 RUN nvcc --version \
     && /opt/conda/bin/conda run -n taco2 python -c "import torch; print(torch.cuda.is_available())"
 
-# Set working directory back to tacotron2
+# Set working directory to tacotron2
+RUN mkdir -p /workspace/tacotron2
 WORKDIR /workspace/tacotron2
 
 # Activate conda
