@@ -2,5 +2,6 @@ Arch/
 dataset/
 output/
 models/
+filelists
 
 __pycache__/
