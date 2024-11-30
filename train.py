@@ -2,8 +2,7 @@ import os
 
 import torch
 import torchaudio
-from sklearn.model_selection import StratifiedShuffleSplit
-from torch.utils.data import Dataset, DataLoader, Subset
+from torch.utils.data import Dataset, DataLoader, random_split
 import torch.nn.functional as F
 import torch.nn as nn
 import torch.optim as optim
@@ -11,15 +10,16 @@ from torchaudio.transforms import MelSpectrogram
 
 from torch.utils.tensorboard import SummaryWriter
 
-from model import DeepFakeClassifier
+from model import DeepFakeClassifier, DeepFakeClassifier_no_transform
 
 from sklearn.metrics import precision_score, recall_score, f1_score
+from sklearn.model_selection import train_test_split
 
 
 def calculate_epoch_metrics(all_outputs, all_labels):
     # Convert tensors to numpy arrays for sklearn compatibility
-    all_outputs = torch.cat(all_outputs).cpu().numpy()
-    all_labels = torch.cat(all_labels).cpu().numpy()
+    all_outputs = torch.cat(all_outputs).cpu().detach().numpy()
+    all_labels = torch.cat(all_labels).cpu().detach().numpy()
 
     # Get the predicted class by taking the max logit/probability
     preds = all_outputs.argmax(axis=1)
@@ -40,14 +40,17 @@ class AudioFileDataset(Dataset):
         self.mel_transform = MelSpectrogram(n_mels=n_mels, f_min=100)
 
         # Load file paths and labels
-        for label, class_name in enumerate(os.listdir(root_dir)):
+        for class_name in os.listdir(root_dir):
             class_dir = os.path.join(root_dir, class_name)
             if os.path.isdir(class_dir):
                 for root, _, files in os.walk(class_dir):
                     for file_name in files:
                         if file_name.endswith('.flac'):
                             self.file_paths.append(os.path.join(root, file_name))
-                            self.labels.append(label)
+                            if 'REALSPEECH' in class_dir:
+                                self.labels.append(0)
+                            else:
+                                self.labels.append(1)
 
     def pad_or_truncate(self, waveform):
         # Pad or truncate waveform to the target length
@@ -64,6 +67,7 @@ class AudioFileDataset(Dataset):
     def __getitem__(self, idx):
         # Load waveform and label
         waveform, sr = torchaudio.load(self.file_paths[idx])
+        waveform = torch.mean(waveform, dim=0, keepdim=True)
 
         # Pad or truncate waveform
         waveform = self.pad_or_truncate(waveform)
@@ -71,13 +75,14 @@ class AudioFileDataset(Dataset):
         # Compute mel-spectrogram
         mel_spec = self.mel_transform(waveform)
 
-        mel_spec = torch.nn.functional.normalize(mel_spec)
+        # mel_spec = torch.nn.functional.normalize(mel_spec)
+        mel_spec = torch.log(mel_spec + 1e-9)
 
         # Return mel-spectrogram and label
         return mel_spec, self.labels[idx]
 
 
-root_dir = "dataset/"
+root_dir = "dataset"
 
 max_length = 0
 
@@ -95,40 +100,80 @@ for label, class_name in enumerate(os.listdir(root_dir)):
                         max_length = length
 
 print(max_length)
-
+max_length = max_length
 dataset = AudioFileDataset(root_dir=root_dir, target_length=max_length, n_mels=64)
 
-# Split dataset into train, val, and test sets with stratification
-labels = dataset.labels
-sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
-train_idx, test_idx = next(sss.split(dataset.file_paths, labels))
-sss_val = StratifiedShuffleSplit(n_splits=1, test_size=0.25, random_state=42)
-train_idx, val_idx = next(sss_val.split([dataset.file_paths[i] for i in train_idx],
-                                        [labels[i] for i in train_idx]))
+# Extract labels
+labels = torch.tensor([label for _, label in dataset])
 
-train_dataset = Subset(dataset, train_idx)
-val_dataset = Subset(dataset, val_idx)
-test_dataset = Subset(dataset, test_idx)
+# Stratified split using sklearn
+train_indices, temp_indices = train_test_split(
+    range(len(labels)),
+    test_size=0.3,
+    stratify=labels,
+    random_state=42
+)
 
+val_indices, test_indices = train_test_split(
+    temp_indices,
+    test_size=0.5,
+    stratify=labels[temp_indices],
+    random_state=42
+)
+
+# Create subsets
+# train_dataset = Subset(dataset, train_indices)
+# val_dataset = Subset(dataset, val_indices)
+# test_dataset = Subset(dataset, test_indices)
+
+train_size = int(0.8 * len(dataset))
+val_size = int(0.1 * len(dataset))
+test_size = len(dataset) - train_size - val_size
+
+train_dataset, val_dataset, test_dataset = random_split(dataset, [train_size, val_size, test_size])
+
+# Dataloaders
 train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+
+
+# Verify class distribution
+def check_class_distribution(loader):
+    counts = [0, 0]
+    for _, labels in loader:
+        counts[0] += (labels == 0).sum().item()
+        counts[1] += (labels == 1).sum().item()
+    return counts
+
+
+print("Train class distribution:", check_class_distribution(train_loader))
+print("Validation class distribution:", check_class_distribution(val_loader))
+print("Test class distribution:", check_class_distribution(test_loader))
 
 if torch.cuda.is_available():
     device = 'cuda'
 else:
-    device = 'cpu'
+    print("CUDA unsupported")
 
 # Hyperparameters
-learning_rate = 0.001
+learning_rate = 0.0005
 num_epochs = 20
 
-model = DeepFakeClassifier().to(device)
+model = DeepFakeClassifier_no_transform().to(device)
 
 # Loss and optimizer
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=10e-5)
 
-writer = SummaryWriter()    # tensorboard writer
+
+# Specify the model name
+model_name = "resnet18"
+
+# Set the log directory path
+log_dir = f"runs/{model_name}"
+
+writer = SummaryWriter(log_dir=log_dir)  # tensorboard writer
 
 print(f'Starting training using {device}')
 
@@ -143,9 +188,10 @@ for epoch in range(num_epochs):
     # Training
     for batch_idx, (mel_specs, labels) in enumerate(train_loader):
         mel_specs, labels = mel_specs.to(device), labels.to(device)
+        optimizer.zero_grad()
         outputs = model(mel_specs)
         loss = criterion(outputs, labels)
-        optimizer.zero_grad()
+
         loss.backward()
         optimizer.step()
 
@@ -200,7 +246,41 @@ for epoch in range(num_epochs):
     print(f'Epoch [{epoch + 1}/{num_epochs}], Val Loss: {val_loss:.4f}, Accuracy: {val_accuracy:.4f}')
 
     # Save checkpoint
-    torch.save(model.state_dict(), f'checkpoint_epoch_{epoch+1}.pth')
+    # torch.save(model.state_dict(), f'checkpoint_epoch_{epoch + 1}.pth')
 
+# Test evaluation
+model.eval()
+test_loss = 0.0
+test_correct_predictions = 0
+test_total_predictions = 0
+test_outputs = []
+test_labels = []
+
+with torch.no_grad():
+    for mel_specs, labels in test_loader:
+        mel_specs, labels = mel_specs.to(device), labels.to(device)
+        outputs = model(mel_specs)
+        loss = criterion(outputs, labels)
+        test_loss += loss.item() * mel_specs.size(0)
+        _, preds = torch.max(outputs, 1)
+        test_correct_predictions += (preds == labels).sum().item()
+        test_total_predictions += labels.size(0)
+        test_outputs.append(outputs)
+        test_labels.append(labels)
+
+# Test metrics
+test_loss /= len(test_loader.dataset)
+test_accuracy = test_correct_predictions / test_total_predictions
+test_precision, test_recall, test_f1 = calculate_epoch_metrics(test_outputs, test_labels)
+writer.add_scalar("Test/Loss", test_loss, num_epochs)
+writer.add_scalar("Test/Accuracy", test_accuracy, num_epochs)
+writer.add_scalar("Test/Precision", test_precision, num_epochs)
+writer.add_scalar("Test/Recall", test_recall, num_epochs)
+writer.add_scalar("Test/F1 Score", test_f1, num_epochs)
+
+torch.save(model.state_dict(), f'resnet_18.pth')
+
+print(f'Test Loss: {test_loss:.4f}, Accuracy: {test_accuracy:.4f}, '
+      f'Precision: {test_precision:.4f}, Recall: {test_recall:.4f}, F1 Score: {test_f1:.4f}')
 writer.close()
 
