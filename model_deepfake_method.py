@@ -3,10 +3,13 @@ from torchvision.models import resnet18, resnet34
 
 
 class DeepFakeMethodClassifier(nn.Module):
-    def __init__(self, num_classes=4, input_channels=1, cnn_out_channels=64):
+    def __init__(self, resnet_type='resnet34', num_classes=4, input_channels=1, cnn_out_channels=64):
         super(DeepFakeMethodClassifier, self).__init__()
 
-        self.resnet = resnet18(pretrained=True)
+        if resnet_type == 'resnet34':
+            self.resnet = resnet34(pretrained=True)
+        elif resnet_type == 'resnet18':
+            self.resnet = resnet18(pretrained=True)
         self.resnet.conv1 = nn.Conv2d(input_channels, cnn_out_channels, kernel_size=7, stride=2, padding=3, bias=False)
 
         self.resnet = nn.Sequential(*list(self.resnet.children())[:-2])
